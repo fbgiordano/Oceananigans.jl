@@ -45,42 +45,41 @@ u_east = OpenBoundaryCondition(OrlanskiBoundary(uᴱ, u₁ᴱ))
 
 u_bcs = FieldBoundaryConditions(west=u_west, east=u_east)
 
-@kernel function _update_west_bc(uᴮ, grid, uⁿ⁺¹, u₁)
+@kernel function _update_west_bc(uᴮ, grid, uⁿ⁺¹, u₁, Δt)
     j, k = @index(Global, NTuple)
 
-    Δut = @inbounds uⁿ⁺¹[2, j, k] -   u₁[1, j, k]
-    Δux = @inbounds uⁿ⁺¹[3, j, k] - uⁿ⁺¹[2, j, k]
+    Δux = @inbounds (uⁿ⁺¹[3, j, k] - uⁿ⁺¹[2, j, k]) 
+    # Δut = @inbounds (uⁿ⁺¹[2, j, k] -   u₁[1, j, k])
+    # c   = ifelse(Δux == 0, zero(grid), abs(Δut / Δux))
 
-    r = ifelse(Δux == 0, zero(grid), Δut / Δux)
+    c = sqrt(9.80665 * grid.Lz) * Δt / Δxᶠᶜᶜ(1, j, k, grid)
 
-    @inbounds uᴮ[1, j, k] = (uᴮ[1, j, k] + r * uⁿ⁺¹[2, j, k]) / (1 + r)
-    @inbounds u₁[1, j, k] = uⁿ⁺¹[2, j, k]
-
-    if isnan(uᴮ[1, j, k]) || isnan(r) 
-        @show uᴮ[1, j, k], r, Δut, Δux
-    end
+    @inbounds uᴮ[1, j, k] =   uᴮ[1, j, k] + c * Δux
+    # @inbounds u₁[1, j, k] = uⁿ⁺¹[2, j, k]
 end
 
-@kernel function _update_east_bc(uᴮ, grid, uⁿ⁺¹, u₁)
+@kernel function _update_east_bc(uᴮ, grid, uⁿ⁺¹, u₁, Δt)
     j, k = @index(Global, NTuple)
+    Nx   = size(grid, 1)
 
-    Δut = @inbounds uⁿ⁺¹[grid.Nx, j, k] - u₁[1, j, k]
-    Δux = @inbounds uⁿ⁺¹[grid.Nx, j, k] - uⁿ⁺¹[grid.Nx-1, j, k]
+    Δux = @inbounds (uⁿ⁺¹[Nx, j, k] - uⁿ⁺¹[Nx-1, j, k])
+    # Δut = @inbounds (uⁿ⁺¹[Nx, j, k] -   u₁[1, j, k])
+    # c   = ifelse(Δux == 0, zero(grid), abs(Δut / Δux))
 
-    r = ifelse(Δux == 0, zero(grid), Δut / Δux)
+    c = sqrt(9.80665 * grid.Lz) * Δt / Δxᶠᶜᶜ(Nx+1, j, k, grid)
 
-    @inbounds uᴮ[1, j, k] = (uᴮ[1, j, k] + r * uⁿ⁺¹[grid.Nx, j, k]) / (1 + r)
-    @inbounds u₁[1, j, k] =  uⁿ⁺¹[grid.Nx, j, k]
+    @inbounds uᴮ[1, j, k] =   uᴮ[1,  j, k] - c * Δux 
+    # @inbounds u₁[1, j, k] = uⁿ⁺¹[Nx, j, k]
 end
-
 
 function update_boundary_condition!(bc::OrlanskiBoundaryCondition, ::Val{:west}, u, model)
     uᴮ = bc.condition.uᴮ
     u₁ = bc.condition.u1
     u  = model.velocities.u
     grid = model.grid
-
-    launch!(architecture(grid), grid, :yz,  _update_west_bc, uᴮ, grid, u, u₁)
+    Δt = ifelse(model.clock.last_Δt > 1e10, zero(grid), model.clock.last_Δt)
+    
+    launch!(architecture(grid), grid, :yz,  _update_west_bc, uᴮ, grid, u, u₁, Δt)
     
     return nothing
 end
@@ -90,9 +89,43 @@ function update_boundary_condition!(bc::OrlanskiBoundaryCondition, ::Val{:east},
     u₁ = bc.condition.u1
     u  = model.velocities.u
     grid = model.grid
-
-    launch!(architecture(grid), grid, :yz,  _update_east_bc, uᴮ, grid, u, u₁)
+    Δt = ifelse(model.clock.last_Δt > 1e10, zero(grid), model.clock.last_Δt)
     
+    launch!(architecture(grid), grid, :yz,  _update_east_bc, uᴮ, grid, u, u₁, Δt)
+    
+    return nothing
+end
+
+function update_boundary_condition!(bcs::FieldBoundaryConditions, u, model)
+    update_boundary_condition!(bcs.west, Val(:west), u, model)
+    update_boundary_condition!(bcs.east, Val(:east), u, model)
+    
+    impose_volume_conservation!(bcs.west, bcs.east, model)
+    
+    return nothing
+end
+
+using Oceananigans.Operators
+
+@kernel function _impose_volume_conservation!(uw, ue, grid)
+    j = @index(Global, Linear)
+
+    Uc = 0
+    for k in 1:grid.Nz
+        Uc += @inbounds uw[1, j, k] * Δzᶠᶜᶜ(1, j, k, grid) + ue[1, j, k] * Δzᶠᶜᶜ(grid.Nx+1, j, k, grid)
+    end
+
+    for k in 1:grid.Nz
+        @inbounds ue[1, j, k] = ue[1, j, k] - Uc / grid.Lz 
+        @inbounds uw[1, j, k] = uw[1, j, k] - Uc / grid.Lz 
+    end
+end
+
+impose_volume_conservation!(u_west, u_east, model) = nothing
+
+function impose_volume_conservation!(u_west::OrlanskiBoundaryCondition, u_east::OrlanskiBoundaryCondition, model)
+    grid = model.grid
+    launch!(architecture(grid), grid, (grid.Ny, ),  _impose_volume_conservation!, u_west.condition.uᴮ, u_east.condition.uᴮ, grid)
     return nothing
 end
 
@@ -102,7 +135,7 @@ end
 
 model = HydrostaticFreeSurfaceModel(; grid,
                                       free_surface,
-                                      vertical_coordinate = ZStar(),
+                                    #   vertical_coordinate = ZStar(),
                                       boundary_conditions = (; u=u_bcs))
 
 #####
@@ -117,7 +150,7 @@ gaussian_bump(x, z) = 0.1 * exp(-((x - Rx)^2 / σ^2))
 
 set!(model, η = gaussian_bump)
 
-simulation = Simulation(model, Δt=1minutes, stop_time=1days)
+simulation = Simulation(model, Δt=0.1minutes, stop_time=1days)
 
 #####
 ##### Attach an output writer and run!
@@ -161,13 +194,15 @@ n = Observable(1)
 
 un = @lift(interior(u[$n], :, 1, 10))
 vn = @lift(interior(v[$n], :, 1, 10))
-wn = @lift(interior(w[$n], :, 1, 5))
+wn = @lift(interior(w[$n], :, 1, 11))
 ηn = @lift(interior(η[$n], :, 1, 1))
 
 lines!(axu, un)
 lines!(axv, vn)
 lines!(axw, wn)
 lines!(axη, ηn)
+
+ylims!(axw, (-1e-5, 1e-5))
 
 record(fig, "hydrostatic_open_boundaries.mp4", 1:Nt) do i 
     @info "doing iteration $i of $Nt"
