@@ -26,9 +26,10 @@ free_surface = ImplicitFreeSurface()
 using Oceananigans.BoundaryConditions: Open
 import Oceananigans.BoundaryConditions: getbc, update_boundary_condition!
 
-struct OrlanskiBoundary{U, U1}
+struct OrlanskiBoundary{U, U1, C}
     uᴮ :: U
     u1 :: U1
+    c :: C
 end
 
 OrlanskiBoundaryCondition = BoundaryCondition{<:Open, <:OrlanskiBoundary}
@@ -37,49 +38,69 @@ uᵂ  = Field{Nothing, Nothing, Center}(grid)
 uᴱ  = Field{Nothing, Nothing, Center}(grid)
 u₁ᵂ = Field{Nothing, Nothing, Center}(grid)
 u₁ᴱ = Field{Nothing, Nothing, Center}(grid)
+cʷ = Field{Nothing, Nothing, Center}(grid)
+cᵉ = Field{Nothing, Nothing, Center}(grid)
+c0 = sqrt(9.80655 * grid.Lz) * 0.1minutes / 10kilometers
+set!(cʷ, c0)
+set!(cᵉ, c0)
+@info cʷ[1,1,1]
 
-u_west = OpenBoundaryCondition(OrlanskiBoundary(uᵂ, u₁ᵂ))
-u_east = OpenBoundaryCondition(OrlanskiBoundary(uᴱ, u₁ᴱ))
+u_west = OpenBoundaryCondition(OrlanskiBoundary(uᵂ, u₁ᵂ, cʷ))
+u_east = OpenBoundaryCondition(OrlanskiBoundary(uᴱ, u₁ᴱ, cᵉ))
 
 @inline getbc(bc::OrlanskiBoundaryCondition, j, k, args...) = bc.condition.uᴮ[1, j, k]
 
 u_bcs = FieldBoundaryConditions(west=u_west, east=u_east)
 
-@kernel function _update_west_bc(uᴮ, grid, uⁿ⁺¹, u₁, Δt)
+@kernel function _update_west_bc(uᴮ, grid, uⁿ⁺¹, u₁, Δt, c)
     j, k = @index(Global, NTuple)
 
     Δux = @inbounds (uⁿ⁺¹[3, j, k] - uⁿ⁺¹[2, j, k]) 
     # Δut = @inbounds (uⁿ⁺¹[2, j, k] -   u₁[1, j, k])
     # c   = ifelse(Δux == 0, zero(grid), abs(Δut / Δux))
+    #c = sqrt(9.80655 * grid.Lz) * Δt/Δxᶠᶜᶜ(1, j, k, grid)
 
-    c = sqrt(9.80665 * grid.Lz) * Δt / Δxᶠᶜᶜ(1, j, k, grid)
+    #@inbounds c[1, j, k] = c[1, j, k] * Δt / Δxᶠᶜᶜ(1, j, k, grid)
+    #@info "West:"
+    #@info uᴮ[1, j, k]
+    #@info uⁿ⁺¹[2,j,k], uⁿ⁺¹[1,j,k]
 
-    @inbounds uᴮ[1, j, k] =   uᴮ[1, j, k] + c * Δux
-    # @inbounds u₁[1, j, k] = uⁿ⁺¹[2, j, k]
+    #@inbounds uᴮ[1, j, k] =   uᴮ[1, j, k] + c * Δux ##kinda works
+    @inbounds uᴮ[1, j, k] =   uᴮ[1, j, k] - c[1, j, k] * uⁿ⁺¹[2,j,k]
+    #@inbounds uᴮ[1, j, k] =   uᴮ[1, j, k] - c[1, j, k] * Δux
+    #@inbounds uᴮ[1, j, k] = (uᴮ[1, j, k]/Δt - c[1, j, k]/grid.Δxᶠᵃᵃ * uⁿ⁺¹[2,j,k]) / (1/Δt - c[1, j, k]/grid.Δxᶠᵃᵃ)
 end
 
-@kernel function _update_east_bc(uᴮ, grid, uⁿ⁺¹, u₁, Δt)
+@kernel function _update_east_bc(uᴮ, grid, uⁿ⁺¹, u₁, Δt, c)
     j, k = @index(Global, NTuple)
     Nx   = size(grid, 1)
 
     Δux = @inbounds (uⁿ⁺¹[Nx, j, k] - uⁿ⁺¹[Nx-1, j, k])
     # Δut = @inbounds (uⁿ⁺¹[Nx, j, k] -   u₁[1, j, k])
     # c   = ifelse(Δux == 0, zero(grid), abs(Δut / Δux))
+    #c = sqrt(9.80655 * grid.Lz) * Δt/Δxᶠᶜᶜ(Nx+1, j, k, grid)
 
-    c = sqrt(9.80665 * grid.Lz) * Δt / Δxᶠᶜᶜ(Nx+1, j, k, grid)
+    #@inbounds c[1, j, k] = c[1, j, k] * Δt / Δxᶠᶜᶜ(Nx+1, j, k, grid)
+    #@info "East:"
+    #@info uᴮ[1, j, k]
+    #@info uⁿ⁺¹[Nx,j,k], uⁿ⁺¹[Nx+1,j,k]
 
-    @inbounds uᴮ[1, j, k] =   uᴮ[1,  j, k] - c * Δux 
-    # @inbounds u₁[1, j, k] = uⁿ⁺¹[Nx, j, k]
+    #@inbounds uᴮ[1, j, k] =   uᴮ[1,  j, k] - c * Δux ##kinda works
+    @inbounds uᴮ[1, j, k] =   uᴮ[1, j, k] + c[1, j, k] * uⁿ⁺¹[Nx,j,k]
+    #@inbounds uᴮ[1, j, k] =   uᴮ[1,  j, k] + c[1, j, k] * Δux 
+    #@inbounds uᴮ[1, j, k] = (uᴮ[1, j, k]/Δt + c[1, j, k]/grid.Δxᶠᵃᵃ * uⁿ⁺¹[Nx,j,k]) / (1/Δt - c[1, j, k]/grid.Δxᶠᵃᵃ)
 end
 
 function update_boundary_condition!(bc::OrlanskiBoundaryCondition, ::Val{:west}, u, model)
     uᴮ = bc.condition.uᴮ
     u₁ = bc.condition.u1
+    c = bc.condition.c
     u  = model.velocities.u
     grid = model.grid
-    Δt = ifelse(model.clock.last_Δt > 1e10, zero(grid), model.clock.last_Δt)
+    #Δt = ifelse(model.clock.last_Δt > 1e10, zero(grid), model.clock.last_Δt)
+    Δt = 0.1minutes
     
-    launch!(architecture(grid), grid, :yz,  _update_west_bc, uᴮ, grid, u, u₁, Δt)
+    launch!(architecture(grid), grid, :yz,  _update_west_bc, uᴮ, grid, u, u₁, Δt, c)
     
     return nothing
 end
@@ -87,11 +108,12 @@ end
 function update_boundary_condition!(bc::OrlanskiBoundaryCondition, ::Val{:east}, u, model)
     uᴮ = bc.condition.uᴮ
     u₁ = bc.condition.u1
+    c = bc.condition.c
     u  = model.velocities.u
     grid = model.grid
     Δt = ifelse(model.clock.last_Δt > 1e10, zero(grid), model.clock.last_Δt)
     
-    launch!(architecture(grid), grid, :yz,  _update_east_bc, uᴮ, grid, u, u₁, Δt)
+    launch!(architecture(grid), grid, :yz,  _update_east_bc, uᴮ, grid, u, u₁, Δt, c)
     
     return nothing
 end
